@@ -27,6 +27,7 @@
 #include <unordered_map>
 #include "core/sstring.hh"
 #include "core/shared_ptr.hh"
+#include "myptr.hh"
 
 using namespace seastar;
 
@@ -156,4 +157,10 @@ BOOST_AUTO_TEST_CASE(test_indirect_functors) {
         BOOST_REQUIRE(a_map.count(make_shared<sstring>("k4")));
         BOOST_REQUIRE(!a_map.count(make_shared<sstring>("k5")));
     }
+}
+
+BOOST_AUTO_TEST_CASE(test_lw_shared_ptr_of_incomplete_class) {
+    my_ptr ptr = make_my_thing();
+    auto ptr2 = ptr;
+    ptr = {};
 }

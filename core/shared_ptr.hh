@@ -109,6 +109,9 @@ struct lw_shared_ptr_accessors_esft;
 template <class T>
 struct lw_shared_ptr_accessors_no_esft;
 
+template <typename T>
+struct lw_shared_ptr_deleter_accessors;
+
 }
 
 
@@ -148,6 +151,8 @@ public:
     friend class lw_shared_ptr;
     template <typename X>
     friend class internal::lw_shared_ptr_accessors_esft;
+    template <typename X>
+    friend class internal::lw_shared_ptr_deleter_accessors;
     template <typename X, class Y>
     friend class internal::lw_shared_ptr_accessors;
 };
@@ -193,6 +198,7 @@ struct lw_shared_ptr_accessors_esft {
     static void dispose(lw_shared_ptr_counter_base* counter) {
         delete static_cast<T*>(counter);
     }
+    static void on_construct(lw_shared_ptr_counter_base* x) {}
 };
 
 template <typename T>
@@ -204,6 +210,7 @@ struct lw_shared_ptr_accessors_no_esft {
     static void dispose(lw_shared_ptr_counter_base* counter) {
         delete static_cast<concrete_type*>(counter);
     }
+    static void on_construct(lw_shared_ptr_counter_base* x) {}
 };
 
 // Generic case: lw_shared_ptr_deleter<T> is not specialized, select
@@ -215,16 +222,22 @@ struct lw_shared_ptr_accessors : std::conditional_t<
          lw_shared_ptr_accessors_no_esft<T>> {
 };
 
-// Overload when lw_shared_ptr_deleter<T> specialized
-template <typename T>
-struct lw_shared_ptr_accessors<T, std::void_t<decltype(lw_shared_ptr_deleter<T>{})>> {
+template<typename T>
+struct lw_shared_ptr_deleter_accessors {
     using concrete_type = T;
-    static T* to_value(lw_shared_ptr_counter_base* counter) {
-        return static_cast<T*>(counter);
-    }
+    static T* to_value(lw_shared_ptr_counter_base*);
     static void dispose(lw_shared_ptr_counter_base* counter) {
         lw_shared_ptr_deleter<T>::dispose(to_value(counter));
     }
+    static void on_construct(lw_shared_ptr_counter_base* x) {
+        to_value(x);
+    }
+};
+
+// Overload when lw_shared_ptr_deleter<T> specialized
+template <typename T>
+struct lw_shared_ptr_accessors<T, std::void_t<decltype(lw_shared_ptr_deleter<T>{})>>
+    : public lw_shared_ptr_deleter_accessors<T> {
 };
 
 }
@@ -242,7 +255,9 @@ private:
     }
     template <typename... A>
     static lw_shared_ptr make(A&&... a) {
-        return lw_shared_ptr(new concrete_type(std::forward<A>(a)...));
+        auto p = new concrete_type(std::forward<A>(a)...);
+        accessors::on_construct(p);
+        return lw_shared_ptr(p);
     }
 public:
     using element_type = T;

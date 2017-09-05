@@ -465,7 +465,7 @@ deps = {
     'tests/allocator_test': ['tests/allocator_test.cc'] + core,
     'tests/output_stream_test': ['tests/output_stream_test.cc'] + core + libnet,
     'tests/udp_zero_copy': ['tests/udp_zero_copy.cc'] + core + libnet,
-    'tests/shared_ptr_test': ['tests/shared_ptr_test.cc'] + core,
+    'tests/shared_ptr_test': ['tests/shared_ptr_test.cc'] + core + ['tests/myptr.cc'],
     'tests/weak_ptr_test': ['tests/weak_ptr_test.cc'] + core,
     'tests/checked_ptr_test': ['tests/checked_ptr_test.cc'] + core,
     'tests/slab_test': ['tests/slab_test.cc'] + core,
