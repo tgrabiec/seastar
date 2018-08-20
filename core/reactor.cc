@@ -1005,7 +1005,9 @@ public:
 
     void notify_requests_finished(io_queue::clock::time_point now) {
         _ioq_ptr->notify_requests_finished(_fq_desc);
-        _pclass.total_service_time += now - _submitted_at;
+        auto service_time = now - _submitted_at;
+        _pclass.total_service_time += service_time;
+        _pclass.max_service_time = std::max(_pclass.max_service_time, service_time);
         ++_pclass.completed;
     }
 
@@ -1246,6 +1248,14 @@ io_queue::priority_class_data::priority_class_data(sstring name, priority_class_
             sm::make_gauge(name + sstring("_total_service_time"), [this] {
                 return std::chrono::duration_cast<std::chrono::duration<float>>(total_service_time).count();
             }, sm::description("total service time for all requests in seconds"), {io_queue_shard(shard), sm::shard_label(owner)}),
+            sm::make_gauge(name + sstring("_max_service_time"), [this] {
+                return std::chrono::duration_cast<std::chrono::duration<float>>(
+                    std::exchange(max_service_time, clock::duration())).count();
+            }, sm::description("maximum service time for all requests since the last query in seconds"), {io_queue_shard(shard), sm::shard_label(owner)}),
+            sm::make_gauge(name + sstring("_max_delay"), [this] {
+                return std::chrono::duration_cast<std::chrono::duration<float>>(
+                    std::exchange(max_queue_time, clock::duration())).count();
+            }, sm::description("maximum queueing time for all requests since the last query in seconds"), {io_queue_shard(shard), sm::shard_label(owner)}),
             sm::make_gauge(name + sstring("_shares"), [this] {
                 return this->ptr->shares();
             }, sm::description("current amount of shares"), {io_queue_shard(shard), sm::shard_label(owner)})
@@ -1309,6 +1319,7 @@ io_queue::queue_request(const io_priority_class& pc, size_t len, io_queue::reque
                 pclass.nr_queued--;
                 pclass.queue_time = std::chrono::duration_cast<std::chrono::duration<double>>(queue_time);
                 pclass.total_queue_time += queue_time;
+                pclass.max_queue_time = std::max(pclass.max_queue_time, queue_time);
                 engine().submit_io(desc.get(), std::move(prepare_io));
                 desc.release();
             } catch (...) {

@@ -548,6 +548,8 @@ public:
         std::chrono::duration<double> queue_time;
         clock::duration total_queue_time;
         clock::duration total_service_time;
+        clock::duration max_service_time;
+        clock::duration max_queue_time;
         metrics::metric_groups _metric_groups;
         priority_class_data(sstring name, priority_class_ptr ptr, shard_id owner);
     };
