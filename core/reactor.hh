@@ -537,17 +537,21 @@ inline open_flags operator|(open_flags a, open_flags b) {
 }
 
 class io_queue {
-private:
+public:
+    using clock = std::chrono::steady_clock;
     struct priority_class_data {
         priority_class_ptr ptr;
         size_t bytes;
         uint64_t ops;
+        uint64_t completed{};
         uint32_t nr_queued;
         std::chrono::duration<double> queue_time;
+        clock::duration total_queue_time;
+        clock::duration total_service_time;
         metrics::metric_groups _metric_groups;
         priority_class_data(sstring name, priority_class_ptr ptr, shard_id owner);
     };
-
+private:
     std::unordered_map<unsigned, lw_shared_ptr<priority_class_data>> _priority_classes;
     fair_queue _fq;
 

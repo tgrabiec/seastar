@@ -135,7 +135,7 @@ struct mountpoint_params {
 };
 
 }
-    
+
 namespace YAML {
 template<>
 struct convert<seastar::mountpoint_params> {
@@ -986,18 +986,27 @@ class io_desc {
     promise<io_event> _pr;
     io_queue* _ioq_ptr;
     fair_queue_request_descriptor _fq_desc;
+    io_queue::priority_class_data& _pclass;
+    io_queue::clock::time_point _submitted_at = {};
 public:
-    io_desc(io_queue* ioq, unsigned weight, unsigned size)
+    io_desc(io_queue* ioq, io_queue::priority_class_data& pclass, unsigned weight, unsigned size)
         : _ioq_ptr(ioq)
         , _fq_desc(fair_queue_request_descriptor{weight, size})
+        , _pclass(pclass)
     {}
 
     fair_queue_request_descriptor& fq_descriptor() {
         return _fq_desc;
     }
 
-    void notify_requests_finished() {
+    void on_submitted(io_queue::clock::time_point now) {
+        _submitted_at = now;
+    }
+
+    void notify_requests_finished(io_queue::clock::time_point now) {
         _ioq_ptr->notify_requests_finished(_fq_desc);
+        _pclass.total_service_time += now - _submitted_at;
+        ++_pclass.completed;
     }
 
     void set_exception(std::exception_ptr eptr) {
@@ -1048,7 +1057,7 @@ reactor::handle_aio_error(::iocb* iocb, int ec) {
             } catch (...) {
                 desc->set_exception(std::current_exception());
             }
-            desc->notify_requests_finished();
+            desc->notify_requests_finished(io_queue::clock::now());
             delete desc;
             // if EBADF, it means that the first request has a bad fd, so
             // we will only remove it from _pending_aio and try again.
@@ -1132,6 +1141,7 @@ bool reactor::process_io()
     struct timespec timeout = {0, 0};
     auto n = io_getevents(_io_context, 1, max_aio, ev, &timeout);
     assert(n >= 0);
+    auto now = io_queue::clock::now();
     unsigned nr_retry = 0;
     for (size_t i = 0; i < size_t(n); ++i) {
         auto iocb = get_iocb(ev[i]);
@@ -1144,7 +1154,7 @@ bool reactor::process_io()
         _free_iocbs.push(iocb);
         auto desc = reinterpret_cast<io_desc*>(ev[i].data);
         desc->set_value(ev[i]);
-        desc->notify_requests_finished();
+        desc->notify_requests_finished(now);
         delete desc;
     }
     return n;
@@ -1216,6 +1226,7 @@ io_queue::priority_class_data::priority_class_data(sstring name, priority_class_
     _metric_groups.add_group("io_queue", {
             sm::make_derive(name + sstring("_total_bytes"), bytes, sm::description("Total bytes passed in the queue"), {io_queue_shard(shard), sm::shard_label(owner)}),
             sm::make_derive(name + sstring("_total_operations"), ops, sm::description("Total bytes passed in the queue"), {io_queue_shard(shard), sm::shard_label(owner)}),
+            sm::make_derive(name + sstring("_completed_operations"), completed, sm::description("The number of completed requests"), {io_queue_shard(shard), sm::shard_label(owner)}),
             // Note: The counter below is not the same as reactor's queued-io-requests
             // queued-io-requests shows us how many requests in total exist in this I/O Queue.
             //
@@ -1229,6 +1240,12 @@ io_queue::priority_class_data::priority_class_data(sstring name, priority_class_
             sm::make_gauge(name + sstring("_delay"), [this] {
                 return queue_time.count();
             }, sm::description("total delay time in the queue"), {io_queue_shard(shard), sm::shard_label(owner)}),
+            sm::make_gauge(name + sstring("_total_delay"), [this] {
+                return std::chrono::duration_cast<std::chrono::duration<float>>(total_queue_time).count();
+            }, sm::description("total queueing time for all requests in seconds"), {io_queue_shard(shard), sm::shard_label(owner)}),
+            sm::make_gauge(name + sstring("_total_service_time"), [this] {
+                return std::chrono::duration_cast<std::chrono::duration<float>>(total_service_time).count();
+            }, sm::description("total service time for all requests in seconds"), {io_queue_shard(shard), sm::shard_label(owner)}),
             sm::make_gauge(name + sstring("_shares"), [this] {
                 return this->ptr->shares();
             }, sm::description("current amount of shares"), {io_queue_shard(shard), sm::shard_label(owner)})
@@ -1281,18 +1298,22 @@ io_queue::queue_request(const io_priority_class& pc, size_t len, io_queue::reque
             weight = io_queue::read_request_base_count;
             size = io_queue::read_request_base_count * len;
         }
-        auto desc = std::make_unique<io_desc>(this, weight, size);
+        auto desc = std::make_unique<io_desc>(this, pclass, weight, size);
         auto fq_desc = desc->fq_descriptor();
         auto fut = desc->get_future();
         _fq.queue(pclass.ptr, std::move(fq_desc), [&pclass, start, prepare_io = std::move(prepare_io), desc = std::move(desc), this] () mutable noexcept {
+            auto now = clock::now();
+            auto queue_time = now - start;
+            desc->on_submitted(now);
             try {
                 pclass.nr_queued--;
-                pclass.queue_time = std::chrono::duration_cast<std::chrono::duration<double>>(std::chrono::steady_clock::now() - start);
+                pclass.queue_time = std::chrono::duration_cast<std::chrono::duration<double>>(queue_time);
+                pclass.total_queue_time += queue_time;
                 engine().submit_io(desc.get(), std::move(prepare_io));
                 desc.release();
             } catch (...) {
                 desc->set_exception(std::current_exception());
-                notify_requests_finished(desc->fq_descriptor());
+                desc->notify_requests_finished(now);
             }
         });
         return fut;
