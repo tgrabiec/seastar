@@ -111,12 +111,18 @@
 #include "core/metrics.hh"
 #include "execution_stage.hh"
 #include "exception_hacks.hh"
+#include "sleep.hh"
+#include "shared_future.hh"
 
 #include <yaml-cpp/yaml.h>
+#include <sched.h>
+#include <wait.h>
 
 #ifdef SEASTAR_TASK_HISTOGRAM
 #include <typeinfo>
 #endif
+
+using namespace std::chrono_literals;
 
 namespace seastar {
 
@@ -3066,6 +3072,187 @@ reactor::activate(task_queue& tq) {
     _activating_task_queues.push_back(&tq);
 }
 
+class cpu_profiler {
+    const unsigned default_sampling_frequency = 773; // prime number to avoid aliasing
+    const unsigned sig_kill_seconds = 20;
+    unsigned _frequency = default_sampling_frequency;
+    std::optional<shared_future<>> _stopping;
+    int _pid = 0;
+    bool _enabled = false;
+    unsigned _stop_tries = 0;
+private:
+    bool running() {
+        return _pid > 0;
+    }
+    sstring new_data_file_path() const {
+        return sprint("/tmp/scylla.%d.perf", std::chrono::system_clock::now().time_since_epoch().count());
+    }
+public:
+    void configure(const boost::program_options::variables_map& args) {
+        _enabled = args["enable-cpu-overload-profiling"].as<bool>();
+        _frequency = args["cpu-profiling-freq"].as<unsigned>();
+    }
+
+    boost::program_options::options_description options_description() {
+        namespace bpo = boost::program_options;
+        bpo::options_description opts;
+        opts.add_options()
+            ("enable-cpu-overload-profiling", bpo::value<bool>()->default_value(false),
+                "automatically record CPU profile when shards become overloaded")
+            ("cpu-profiling-freq", bpo::value<unsigned>()->default_value(default_sampling_frequency),
+                "sampling frequency used by the CPU profiler");
+        return opts;
+    }
+
+    // Sets the sampling frequency for profiling sessions started by later start().
+    // Does not affect ongoing sessions.
+    void set_sampling_frequency(unsigned freq) {
+        _frequency = freq;
+    }
+
+    // Determines whether profiling will be started by later start() calls.
+    // Does not affect ongoing sessions.
+    void set_enabled(bool enabled) {
+        _enabled = enabled;
+    }
+
+    void on_init() {
+        local_engine->at_exit([this] {
+            _enabled = false;
+            return stop();
+        });
+        if (_enabled && local_engine->cpu_id() == 0) {
+            later().then([this] {
+                seastar_logger.info("Testing CPU profiling");
+                start();
+                later().then([this] {
+                    stop();
+                });
+            });
+        }
+    }
+
+    // Starts a CPU profiler for current CPU, unless it's already running.
+    void start() {
+        if (!_enabled || running()) {
+            return;
+        }
+        auto path = new_data_file_path();
+        auto cpu = sched_getcpu();
+        seastar_logger.info("Profiling CPU {}, output: {}", cpu, path);
+        int pid = fork();
+        if (pid == -1) {
+            seastar_logger.error("fork() failed: {}", strerror(errno));
+            return;
+        }
+        if (pid) {
+            _pid = pid;
+            return;
+        }
+        sigset_t mask;
+        sigfillset(&mask);
+        auto r = ::pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+        if (r) {
+            seastar_logger.error("pthread_sigmask() failed: {}", strerror(r));
+            exit(1);
+        }
+        execlp("perf", "perf", "record",
+            "--call-graph", "dwarf",
+            "-F", std::to_string(_frequency).c_str(),
+            "-C", std::to_string(cpu).c_str(),
+            "-o", path.c_str(), NULL);
+        seastar_logger.error("Failed to execute perf: {}", strerror(errno));
+        exit(1);
+    }
+
+    // Stops the profiling session started by prior start(), if any.
+    // Returns a future which resolves when the profiler is no longer running.
+    // Can be called concurrently, and each call will wait for the profiler.
+    future<> stop() noexcept {
+        if (!running()) {
+            return make_ready_future<>();
+        }
+        if (!_stopping) {
+            seastar_logger.info("Stopping the CPU profiler");
+            _stop_tries = 0;
+            _stopping.emplace(repeat([this] {
+                auto sig = SIGTERM;
+                if (_stop_tries >= sig_kill_seconds) {
+                    sig = SIGKILL;
+                    if (_stop_tries == sig_kill_seconds) {
+                        seastar_logger.error("Using SIGKILL on {}", _pid);
+                    }
+                }
+                if (kill(_pid, sig)) {
+                    seastar_logger.error("kill({}) failed: {}", _pid, strerror(errno));
+                }
+                return sleep(1s).then([this] {
+                    int status;
+                    int pid = waitpid(_pid, &status, WNOHANG);
+                    if (pid < 0) {
+                        seastar_logger.error("waitpid({}) failed: {}", _pid, strerror(errno));
+                    } else if (!pid) {
+                        seastar_logger.info("perf still running (pid={})", _pid);
+                        ++_stop_tries;
+                    } else {
+                        _stopping = {};
+                        _pid = 0;
+                        auto exit_code = WEXITSTATUS(status);
+                        if (exit_code) {
+                            seastar_logger.error("perf failed with exit code {}, profiling disabled", exit_code);
+                            _enabled = false;
+                        }
+                        return stop_iteration::yes;
+                    }
+                    return stop_iteration::no;
+                });
+            }));
+        }
+        return *_stopping;
+    }
+};
+
+// Decides when to profile
+// on_tick() should be called once per second.
+class cpu_profiler_controller {
+    // Will start the profiler when the CPU starts to be overloaded,
+    // until it no longer but no longer that for _max_profiling_duration.
+    // The node is considered overloaded when its average CPU utilization
+    // is above the _utilization_threshold.
+    float _utilization_threshold = 0.95;
+    std::chrono::seconds _max_profiling_duration = 10s;
+private:
+    cpu_profiler& _profiler;
+    timer<> _cutoff_timer;
+    bool _overloaded = false;
+public:
+    cpu_profiler_controller(cpu_profiler& profiler)
+        : _profiler(profiler)
+        , _cutoff_timer([this] {
+            seastar_logger.info("Stopping CPU profiling due to time limit");
+            _profiler.stop();
+        })
+    { }
+    // idle_time is the duration for which the node was idle since the last on_tick().
+    // on_tick() is assumed to be called once per second.
+    template<typename Duration>
+    void on_tick(Duration idle_time) {
+        if (idle_time <= (1 - _utilization_threshold) * std::chrono::duration_cast<Duration>(1s)) {
+            if (!_overloaded) { // edge-triggered
+                _overloaded = true;
+                _profiler.start();
+                _cutoff_timer.arm(_max_profiling_duration);
+            }
+        } else {
+            _overloaded = false;
+            _profiler.stop();
+            _cutoff_timer.cancel();
+        }
+    }
+};
+
+static thread_local cpu_profiler the_cpu_profiler;
+
 int reactor::run() {
     auto signal_stack = install_signal_handler_stack();
 
@@ -3141,9 +3328,11 @@ int reactor::run() {
     timer<lowres_clock> load_timer;
     auto last_idle = _total_idle;
     auto idle_start = sched_clock::now(), idle_end = idle_start;
-    load_timer.set_callback([this, &last_idle, &idle_start, &idle_end] () mutable {
+    auto cpc = std::make_unique<cpu_profiler_controller>(the_cpu_profiler);
+    load_timer.set_callback([this, &last_idle, &idle_start, &idle_end, cpc = std::move(cpc)] () mutable {
         _total_idle += idle_end - idle_start;
-        auto load = double((_total_idle - last_idle).count()) / double(std::chrono::duration_cast<sched_clock::duration>(1s).count());
+        auto this_idle = _total_idle - last_idle;
+        auto load = double(this_idle.count()) / double(std::chrono::duration_cast<sched_clock::duration>(1s).count());
         last_idle = _total_idle;
         load = std::min(load, 1.0);
         idle_start = idle_end;
@@ -3154,6 +3343,7 @@ int reactor::run() {
             _load -= (drop/5);
         }
         _load += (load/5);
+        cpc->on_tick(this_idle);
     });
     load_timer.arm_periodic(1s);
 
@@ -3175,6 +3365,9 @@ int reactor::run() {
     std::function<bool()> pure_check_for_work = [this] () {
         return pure_poll_once() || have_more_tasks() || seastar::thread::try_run_one_yielded_thread();
     };
+
+    the_cpu_profiler.on_init();
+
     while (true) {
         run_some_tasks();
         if (_stopped) {
@@ -3763,6 +3956,7 @@ reactor::get_options_description(std::chrono::duration<double> default_task_quot
 #endif
         ;
     opts.add(network_stack_registry::options_description());
+    opts.add(the_cpu_profiler.options_description());
     return opts;
 }
 
@@ -4224,6 +4418,7 @@ void smp::configure(boost::program_options::variables_map configuration)
             assign_io_queue(i, queue_idx);
             inited.wait();
             engine().configure(configuration);
+            the_cpu_profiler.configure(configuration);
             engine().run();
         });
     }
@@ -4258,6 +4453,8 @@ void smp::configure(boost::program_options::variables_map configuration)
     engine().configure(configuration);
     // The raw `new` is necessary because of the private constructor of `lowres_clock_impl`.
     engine()._lowres_clock_impl = std::unique_ptr<lowres_clock_impl>(new lowres_clock_impl);
+
+    the_cpu_profiler.configure(configuration);
 }
 
 bool smp::poll_queues() {
