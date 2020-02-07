@@ -19,6 +19,7 @@
  * Copyright 2017 ScyllaDB
  */
 #include <seastar/util/backtrace.hh>
+#include <seastar/util/variant_utils.hh>
 
 #include <link.h>
 #include <sys/types.h>
@@ -28,6 +29,8 @@
 #include <string.h>
 
 #include <seastar/core/print.hh>
+#include <seastar/core/thread.hh>
+#include <seastar/core/reactor.hh>
 
 
 namespace seastar {
@@ -79,22 +82,35 @@ frame decorate(uintptr_t addr) {
     return {&so, addr - so.begin};
 }
 
-saved_backtrace current_backtrace() noexcept {
-    saved_backtrace::vector_type v;
+simple_backtrace current_backtrace_tasklocal() noexcept {
+    simple_backtrace::vector_type v;
     backtrace([&] (frame f) {
         if (v.size() < v.capacity()) {
             v.emplace_back(std::move(f));
         }
     });
-    return saved_backtrace(std::move(v), current_scheduling_group());
+    return simple_backtrace(std::move(v));
 }
 
-size_t saved_backtrace::hash() const {
+size_t simple_backtrace::hash() const {
     size_t h = 0;
     for (auto f : _frames) {
         h = ((h << 5) - h) ^ (f.so->begin + f.addr);
     }
     return h;
+}
+
+size_t tasktrace::hash() const {
+    size_t hash = 0;
+    for (auto&& sb : _prev) {
+        hash *= 31;
+        std::visit(make_visitor([&] (const shared_backtrace& sb) {
+            hash ^= sb->hash();
+        }, [&] (const frame& f) {
+            hash ^= (f.so->begin + f.addr);
+        }), sb);
+    }
+    return hash;
 }
 
 std::ostream& operator<<(std::ostream& out, const frame& f) {
@@ -105,12 +121,57 @@ std::ostream& operator<<(std::ostream& out, const frame& f) {
     return out;
 }
 
-std::ostream& operator<<(std::ostream& out, const saved_backtrace& b) {
+std::ostream& operator<<(std::ostream& out, const simple_backtrace& b) {
     for (auto f : b._frames) {
         out << "   " << f << "\n";
     }
     return out;
 }
 
+std::ostream& operator<<(std::ostream& out, const tasktrace& b) {
+    out << b._main;
+    for (auto&& e : b._prev) {
+        out << "   --------\n";
+        std::visit(make_visitor([&] (const shared_backtrace& sb) {
+            out << sb;
+        }, [&] (const frame& f) {
+            out << "   " << f << "\n";
+        }), e);
+    }
+    return out;
+}
+
+tasktrace current_tasktrace() noexcept {
+    auto main = current_backtrace_tasklocal();
+
+    tasktrace::vector_type prev;
+    if (local_engine && g_current_context) {
+        task* tsk = nullptr;
+
+        thread_context* thread = thread_impl::get();
+        if (thread) {
+            tsk = thread->waiting_task();
+        } else {
+            tsk = local_engine->current_task();
+        }
+
+        while (tsk && prev.size() < prev.max_size()) {
+            // Push pointer to tsk->run_and_dispose()
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpmf-conversions"
+            void (task::*mfp)() = &task::run_and_dispose;
+            auto addr = uintptr_t((void*)(tsk->*mfp));
+#pragma GCC diagnostic pop
+            prev.push_back(short_backtrace(decorate(addr)));
+            tsk = tsk->waiting_task();
+        }
+    }
+
+    return tasktrace(std::move(main), std::move(prev), current_scheduling_group());
+}
+
+saved_backtrace current_backtrace() noexcept {
+    return current_tasktrace();
+}
 
 } // namespace seastar
