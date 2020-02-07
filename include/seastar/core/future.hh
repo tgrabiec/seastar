@@ -610,7 +610,7 @@ public:
 #endif
 private:
     template <typename Func>
-    void schedule(Func&&) noexcept;
+    continuation_base<T...>* schedule(Func&&) noexcept;
 
     void schedule(continuation_base<T...>* callback) noexcept {
         _state = &callback->_state;
@@ -894,6 +894,7 @@ template <typename... T>
 class continuation_base : public task {
 protected:
     future_state<T...> _state;
+    internal::promise_base* _result_pr; // For backtracing
     using future_type = future<T...>;
     using promise_type = promise<T...>;
 public:
@@ -920,10 +921,11 @@ struct continuation final : continuation_base<T...> {
 
 template<typename... T>
 template<typename Func>
-void internal::promise_base_with_type<T...>::schedule(Func&& func) noexcept {
+continuation_base<T...>* internal::promise_base_with_type<T...>::schedule(Func&& func) noexcept {
     auto tws = new continuation<Func, T...>(std::move(func));
     _state = &tws->_state;
     _task = tws;
+    return tws;
 }
 
 /// \brief A representation of a possibly not-yet-computed value.
@@ -999,16 +1001,19 @@ private:
         return static_cast<internal::promise_base_with_type<T...>*>(future_base::detach_promise());
     }
     template <typename Func>
-    void schedule(Func&& func) noexcept {
+    continuation_base<T...>* schedule(Func&& func) noexcept {
         if (_state.available() || !_promise) {
             if (__builtin_expect(!_state.available() && !_promise, false)) {
                 _state.set_to_broken_promise();
             }
-            ::seastar::schedule(new continuation<Func, T...>(std::move(func), std::move(_state)));
+            auto cont = new continuation<Func, T...>(std::move(func), std::move(_state));
+            ::seastar::schedule(cont);
+            return static_cast<continuation_base<T...>*>(cont);
         } else {
             assert(_promise);
-            detach_promise()->schedule(std::move(func));
+            auto cont = detach_promise()->schedule(std::move(func));
             _state._u.st = future_state_base::state::invalid;
+            return cont;
         }
     }
 
@@ -1195,13 +1200,14 @@ private:
         // that happens.
         [&] () noexcept {
             memory::disable_failure_guard dfg;
-            schedule([pr = fut.get_promise(), func = std::forward<Func>(func)] (future_state<T...>&& state) mutable {
+            continuation_base<T...>* cont = schedule([pr = fut.get_promise(), func = std::forward<Func>(func)] (future_state<T...>&& state) mutable {
                 if (state.failed()) {
                     pr.set_exception(static_cast<future_state_base&&>(std::move(state)));
                 } else {
                     futurator::apply(std::forward<Func>(func), std::move(state).get_value()).forward_to(std::move(pr));
                 }
             });
+            cont->_result_pr = fut._promise;
         } ();
         return fut;
     }
@@ -1272,9 +1278,10 @@ private:
         // that happens.
         [&] () noexcept {
             memory::disable_failure_guard dfg;
-            schedule([pr = fut.get_promise(), func = std::forward<Func>(func)] (future_state<T...>&& state) mutable {
+            auto cont = schedule([pr = fut.get_promise(), func = std::forward<Func>(func)] (future_state<T...>&& state) mutable {
                 futurator::apply(std::forward<Func>(func), future(std::move(state))).forward_to(std::move(pr));
             });
+            cont->_result_pr = fut._promise;
         } ();
         return fut;
     }
