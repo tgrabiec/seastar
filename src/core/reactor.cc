@@ -2787,6 +2787,7 @@ public:
         }
         delete this;
     }
+    task* backtrack() noexcept override { return nullptr; }
     void cancel() {
         _p = nullptr;
     }
@@ -2804,6 +2805,7 @@ public:
         engine().unregister_poller(_p.get());
         delete this;
     }
+    task* backtrack() noexcept override { return nullptr; }
 };
 
 void reactor::register_poller(pollfn* p) {

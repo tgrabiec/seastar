@@ -60,6 +60,8 @@ public:
             auto handle = std::experimental::coroutine_handle<promise_type>::from_promise(*this);
             handle.resume();
         }
+
+        task* backtrack() noexcept override { return _promise.backtrack(); }
     };
 };
 
@@ -91,6 +93,8 @@ public:
             auto handle = std::experimental::coroutine_handle<promise_type>::from_promise(*this);
             handle.resume();
         }
+
+       task* backtrack() noexcept override { return _promise.backtrack(); }
     };
 };
 

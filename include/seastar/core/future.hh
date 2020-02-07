@@ -560,6 +560,9 @@ protected:
 
     friend class future_base;
     template <typename... U> friend class seastar::future;
+public:
+    /// Returns the task which is waiting for this promise to resolve, or nullptr.
+    task* backtrack() const noexcept { return _task; }
 };
 
 /// \brief A promise with type but no local data.
@@ -649,6 +652,9 @@ public:
         return *this;
     }
     void operator=(const promise&) = delete;
+
+    /// Returns the task which is waiting for this promise to resolve, or nullptr.
+    task* backtrack() const { return internal::promise_base::_task; }
 
     /// \brief Gets the promise's associated future.
     ///
@@ -903,6 +909,9 @@ public:
     void set_state(future_state<T...>&& state) {
         _state = std::move(state);
     }
+    virtual task* backtrack() noexcept override {
+        return _result_pr->backtrack();
+    }
     friend class internal::promise_base_with_type<T...>;
     friend class promise<T...>;
     friend class future<T...>;
@@ -927,6 +936,17 @@ continuation_base<T...>* internal::promise_base_with_type<T...>::schedule(Func&&
     _task = tws;
     return tws;
 }
+
+class thread_wake_task_base {
+protected:
+    thread_context* _thread;
+public:
+    thread_wake_task_base(thread_context* thread)
+        : _thread(thread)
+    {}
+    /// Returns the task which is waiting for this thread to be done, or nullptr.
+    task* backtrack() noexcept;
+};
 
 /// \brief A representation of a possibly not-yet-computed value.
 ///
@@ -1109,18 +1129,20 @@ public:
         }
     }
 private:
-    class thread_wake_task final : public continuation_base<T...> {
-        thread_context* _thread;
+    class thread_wake_task final : public continuation_base<T...>, thread_wake_task_base {
         future* _waiting_for;
     public:
         thread_wake_task(thread_context* thread, future* waiting_for)
-                : _thread(thread), _waiting_for(waiting_for) {
+                : thread_wake_task_base(thread), _waiting_for(waiting_for) {
         }
         virtual void run_and_dispose() noexcept override {
             _waiting_for->_state = std::move(this->_state);
             thread_impl::switch_in(_thread);
             // no need to delete, since this is always allocated on
             // _thread's stack.
+        }
+        virtual task* backtrack() noexcept override {
+            return thread_wake_task_base::backtrack();
         }
     };
     void do_wait() noexcept {

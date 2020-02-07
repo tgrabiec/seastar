@@ -120,6 +120,7 @@ private:
     // are complete.
     void wait_for_one() noexcept;
     virtual void run_and_dispose() noexcept override;
+    task* backtrack() noexcept override { return _result.backtrack(); }
 public:
     parallel_for_each_state(size_t n);
     void add_future(future<>&& f);
@@ -222,6 +223,7 @@ public:
         _state.set(std::make_tuple(si));
     }
     future<> get_future() { return _promise.get_future(); }
+    task* backtrack() noexcept override { return _promise.backtrack(); }
     virtual void run_and_dispose() noexcept override {
         if (_state.failed()) {
             _promise.set_exception(std::move(_state).get_exception());
@@ -342,6 +344,7 @@ public:
         this->_state.set(std::make_tuple(std::move(st)));
     }
     future<T> get_future() { return _promise.get_future(); }
+    task* backtrack() noexcept override { return _promise.backtrack(); }
     virtual void run_and_dispose() noexcept override {
         if (this->_state.failed()) {
             _promise.set_exception(std::move(this->_state).get_exception());
@@ -448,6 +451,7 @@ class do_until_state final : public continuation_base<> {
 public:
     explicit do_until_state(StopCondition stop, AsyncAction action) : _stop(std::move(stop)), _action(std::move(action)) {}
     future<> get_future() { return _promise.get_future(); }
+    task* backtrack() noexcept override { return _promise.backtrack(); }
     virtual void run_and_dispose() noexcept override {
         if (_state.available()) {
             if (_state.failed()) {
@@ -686,6 +690,7 @@ public:
     when_all_state_base(size_t nr_remain, const when_all_process_element* processors, void* continuation)
             : _nr_remain(nr_remain), _processors(processors), _continuation(continuation) {
     }
+    virtual task* backtrack() = 0;
     void complete_one() {
         // We complete in reverse order; if the futures happen to complete
         // in order, then waiting for the last one will find the rest ready
@@ -727,6 +732,7 @@ public:
         }
     }
     when_all_state_component(when_all_state_base *base, Future* future) : _base(base), _final_resting_place(future) {}
+    task* backtrack() noexcept override { return _base->backtrack(); }
     virtual void run_and_dispose() noexcept override {
         using futurator = futurize<Future>;
         if (__builtin_expect(this->_state.failed(), false)) {
@@ -762,6 +768,9 @@ public:
     }
     virtual ~when_all_state() {
         ResolvedTupleTransform::set_promise(p, std::move(tuple));
+    }
+    task* backtrack() noexcept override {
+        return p.backtrack();
     }
 private:
     template <size_t... Idx>

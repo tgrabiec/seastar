@@ -54,6 +54,9 @@ public:
         _pr.set_urgent_state(std::move(this->_state));
         delete this;
     }
+    task* backtrack() noexcept override {
+        return _pr.backtrack();
+    }
     HeldState& data() {
         return _held;
     }
