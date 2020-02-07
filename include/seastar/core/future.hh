@@ -482,32 +482,10 @@ static_assert(sizeof(future_state<>) <= 8, "future_state<> is too large");
 static_assert(sizeof(future_state<long>) <= 16, "future_state<long> is too large");
 
 template <typename... T>
-class continuation_base : public task {
-protected:
-    future_state<T...> _state;
-    using future_type = future<T...>;
-    using promise_type = promise<T...>;
-public:
-    continuation_base() = default;
-    explicit continuation_base(future_state<T...>&& state) : _state(std::move(state)) {}
-    void set_state(future_state<T...>&& state) {
-        _state = std::move(state);
-    }
-    friend class internal::promise_base_with_type<T...>;
-    friend class promise<T...>;
-    friend class future<T...>;
-};
+class continuation_base;
 
 template <typename Func, typename... T>
-struct continuation final : continuation_base<T...> {
-    continuation(Func&& func, future_state<T...>&& state) : continuation_base<T...>(std::move(state)), _func(std::move(func)) {}
-    continuation(Func&& func) : _func(std::move(func)) {}
-    virtual void run_and_dispose() noexcept override {
-        _func(std::move(this->_state));
-        delete this;
-    }
-    Func _func;
-};
+class continuation;
 
 namespace internal {
 
@@ -632,11 +610,8 @@ public:
 #endif
 private:
     template <typename Func>
-    void schedule(Func&& func) noexcept {
-        auto tws = new continuation<Func, T...>(std::move(func));
-        _state = &tws->_state;
-        _task = tws;
-    }
+    void schedule(Func&&) noexcept;
+
     void schedule(continuation_base<T...>* callback) noexcept {
         _state = &callback->_state;
         _task = callback;
@@ -913,6 +888,42 @@ struct warn_variadic_future<true> {
     void check_deprecation() {}
 };
 
+}
+
+template <typename... T>
+class continuation_base : public task {
+protected:
+    future_state<T...> _state;
+    using future_type = future<T...>;
+    using promise_type = promise<T...>;
+public:
+    continuation_base() = default;
+    explicit continuation_base(future_state<T...>&& state) : _state(std::move(state)) {}
+    void set_state(future_state<T...>&& state) {
+        _state = std::move(state);
+    }
+    friend class internal::promise_base_with_type<T...>;
+    friend class promise<T...>;
+    friend class future<T...>;
+};
+
+template <typename Func, typename... T>
+struct continuation final : continuation_base<T...> {
+    continuation(Func&& func, future_state<T...>&& state) : continuation_base<T...>(std::move(state)), _func(std::move(func)) {}
+    continuation(Func&& func) : _func(std::move(func)) {}
+    virtual void run_and_dispose() noexcept override {
+        _func(std::move(this->_state));
+        delete this;
+    }
+    Func _func;
+};
+
+template<typename... T>
+template<typename Func>
+void internal::promise_base_with_type<T...>::schedule(Func&& func) noexcept {
+    auto tws = new continuation<Func, T...>(std::move(func));
+    _state = &tws->_state;
+    _task = tws;
 }
 
 /// \brief A representation of a possibly not-yet-computed value.
