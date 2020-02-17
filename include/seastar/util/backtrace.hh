@@ -69,15 +69,18 @@ public:
     using vector_type = boost::container::static_vector<frame, 64>;
 private:
     vector_type _frames;
+    size_t _hash;
+private:
+    size_t calculate_hash() const;
 public:
     simple_backtrace() = default;
     simple_backtrace(vector_type f) : _frames(std::move(f)) {}
-    size_t hash() const;
+    size_t hash() const { return _hash; }
 
     friend std::ostream& operator<<(std::ostream& out, const simple_backtrace&);
 
     bool operator==(const simple_backtrace& o) const {
-        return _frames == o._frames;
+        return _hash == o._hash && _frames == o._frames;
     }
 
     bool operator!=(const simple_backtrace& o) const {
@@ -103,21 +106,23 @@ private:
     simple_backtrace _main;
     vector_type _prev;
     scheduling_group _sg;
+    size_t _hash;
 public:
     tasktrace() = default;
 
-    tasktrace(simple_backtrace main, vector_type prev, scheduling_group sg)
+    tasktrace(simple_backtrace main, vector_type prev, size_t prev_hash, scheduling_group sg)
         : _main(std::move(main))
         , _prev(std::move(prev))
         , _sg(sg)
+        , _hash(main.hash() * 31 ^ prev_hash)
     { }
 
-    size_t hash() const;
+    size_t hash() const { return _hash; }
 
     friend std::ostream& operator<<(std::ostream& out, const tasktrace&);
 
     bool operator==(const tasktrace& o) const {
-        return _main == o._main && _prev == o._prev;
+        return _hash == o._hash && _main == o._main && _prev == o._prev;
     }
 
     bool operator!=(const tasktrace& o) const {

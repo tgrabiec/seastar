@@ -19,7 +19,6 @@
  * Copyright 2017 ScyllaDB
  */
 #include <seastar/util/backtrace.hh>
-#include <seastar/util/variant_utils.hh>
 
 #include <link.h>
 #include <sys/types.h>
@@ -92,25 +91,12 @@ simple_backtrace current_backtrace_tasklocal() noexcept {
     return simple_backtrace(std::move(v));
 }
 
-size_t simple_backtrace::hash() const {
+size_t simple_backtrace::calculate_hash() const {
     size_t h = 0;
     for (auto f : _frames) {
         h = ((h << 5) - h) ^ (f.so->begin + f.addr);
     }
     return h;
-}
-
-size_t tasktrace::hash() const {
-    size_t hash = 0;
-    for (auto&& sb : _prev) {
-        hash *= 31;
-        std::visit(make_visitor([&] (const shared_backtrace& sb) {
-            hash ^= sb->hash();
-        }, [&] (const frame& f) {
-            hash ^= (f.so->begin + f.addr);
-        }), sb);
-    }
-    return hash;
 }
 
 std::ostream& operator<<(std::ostream& out, const frame& f) {
@@ -145,6 +131,7 @@ tasktrace current_tasktrace() noexcept {
     auto main = current_backtrace_tasklocal();
 
     tasktrace::vector_type prev;
+    size_t hash = 0;
     if (local_engine && g_current_context) {
         task* tsk = nullptr;
 
@@ -157,7 +144,9 @@ tasktrace current_tasktrace() noexcept {
 
         while (tsk && prev.size() < prev.max_size()) {
             shared_backtrace bt = tsk->get_backtrace();
+            hash *= 31;
             if (bt) {
+                hash ^= bt->hash();
                 prev.push_back(bt);
             } else {
                 // Push pointer to tsk->run_and_dispose()
@@ -167,12 +156,13 @@ tasktrace current_tasktrace() noexcept {
                 auto addr = uintptr_t((void*)(tsk->*mfp));
 #pragma GCC diagnostic pop
                 prev.push_back(short_backtrace(decorate(addr)));
+                hash ^= addr;
             }
             tsk = tsk->waiting_task();
         }
     }
 
-    return tasktrace(std::move(main), std::move(prev), current_scheduling_group());
+    return tasktrace(std::move(main), std::move(prev), hash, current_scheduling_group());
 }
 
 saved_backtrace current_backtrace() noexcept {
