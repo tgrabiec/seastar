@@ -24,6 +24,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/sleep.hh>
+#include <seastar/util/backtrace.hh>
 #include <seastar/core/do_with.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/thread.hh>
@@ -1210,4 +1211,32 @@ SEASTAR_TEST_CASE(test_warn_on_broken_promise_with_no_future) {
     (void)p.get_future();
     p.set_exception(std::runtime_error("foo"));
     return make_ready_future<>();
+}
+
+future<> func4() {
+    return later().then([] {
+        seastar_logger.info("backtrace: {}", current_backtrace());
+    });
+}
+
+void func3() {
+    seastar::async([] {
+        func4().get();
+    }).get();
+}
+
+future<> func2() {
+    return seastar::async([] {
+        func3();
+    });
+}
+
+future<> func1() {
+    return later().then([] {
+        return func2();
+    });
+}
+
+SEASTAR_THREAD_TEST_CASE(test_backtracing) {
+    func1().get();
 }
