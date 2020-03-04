@@ -498,8 +498,24 @@ class continuation_base_with_promise : public continuation_base<T...> {
     friend class internal::promise_base_with_type<T...>;
 protected:
     continuation_base_with_promise(Promise&& pr, future_state<T...>&& state)
-        : continuation_base<T...>(std::move(state)), _pr(std::move(pr)) {}
-    continuation_base_with_promise(Promise&& pr) : _pr(std::move(pr)) {}
+        : continuation_base<T...>(std::move(state)), _pr(std::move(pr)) {
+#ifdef SEASTAR_TASK_BACKTRACE
+        try {
+            task::make_backtrace();
+        } catch (...) {
+            // ignore
+        }
+#endif
+    }
+    continuation_base_with_promise(Promise&& pr) : _pr(std::move(pr)) {
+#ifdef SEASTAR_TASK_BACKTRACE
+        try {
+            task::make_backtrace();
+        } catch (...) {
+            // ignore
+        }
+#endif
+    }
     virtual task* waiting_task() noexcept override;
     Promise _pr;
 };
@@ -1167,6 +1183,9 @@ private:
         auto thread = thread_impl::get();
         assert(thread);
         thread_wake_task wake_task{thread, this};
+#ifdef SEASTAR_TASK_BACKTRACE
+        wake_task.make_backtrace();
+#endif
         detach_promise()->schedule(static_cast<continuation_base<T...>*>(&wake_task));
         thread_impl::switch_out(thread);
     }
