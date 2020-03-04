@@ -4366,4 +4366,15 @@ std::ostream& operator<<(std::ostream& os, const stall_report& sr) {
 
 }
 
+void task::make_backtrace() noexcept {
+#ifdef SEASTAR_TASK_BACKTRACE
+    memory::disable_backtrace_temporarily dbt;
+    try {
+        _bt = make_lw_shared<simple_backtrace>(current_backtrace_tasklocal());
+    } catch (...) {
+        _bt = nullptr;
+    }
+#endif
+}
+
 }
