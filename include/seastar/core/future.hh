@@ -1167,6 +1167,9 @@ private:
         auto thread = thread_impl::get();
         assert(thread);
         thread_wake_task wake_task{thread, this};
+#ifdef SEASTAR_TASK_BACKTRACE
+        wake_task.make_backtrace();
+#endif
         detach_promise()->schedule(static_cast<continuation_base<T...>*>(&wake_task));
         thread_impl::switch_out(thread);
     }
@@ -1236,6 +1239,9 @@ private:
                     futurator::apply(std::forward<Func>(func), std::move(state).get_value()).forward_to(std::move(pr));
                 }
             });
+#ifdef SEASTAR_TASK_BACKTRACE
+            cont->make_backtrace();
+#endif
         } ();
         return fut;
     }
@@ -1315,6 +1321,9 @@ private:
             schedule(fut.get_promise(), [func = std::forward<Func>(func)] (pr_type& pr, future_state<T...>&& state) mutable {
                 futurator::invoke(std::forward<Func>(func), future(std::move(state))).forward_to(std::move(pr));
             });
+#ifdef SEASTAR_TASK_BACKTRACE
+            cont->make_backtrace();
+#endif
         } ();
         return fut;
     }
