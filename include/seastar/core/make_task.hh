@@ -40,6 +40,9 @@ public:
         futurator::apply(_func).forward_to(std::move(_result));
         delete this;
     }
+    virtual task* backtrack() noexcept override {
+        return _result.backtrack();
+    }
 };
 
 template <typename Func>
