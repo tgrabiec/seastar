@@ -156,13 +156,18 @@ saved_backtrace current_backtrace() noexcept {
         }
 
         while (tsk && prev.size() < prev.max_size()) {
-            // Push pointer to tsk->run_and_dispose()
+            shared_backtrace bt = tsk->get_backtrace();
+            if (bt) {
+                prev.push_back(bt);
+            } else {
+                // Push pointer to tsk->run_and_dispose()
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpmf-conversions"
-            void (task::*mfp)() = &task::run_and_dispose;
-            auto addr = uintptr_t((void*)(tsk->*mfp));
+                void (task::*mfp)() = &task::run_and_dispose;
+                auto addr = uintptr_t((void*)(tsk->*mfp));
 #pragma GCC diagnostic pop
-            prev.push_back(decorate(addr));
+                prev.push_back(decorate(addr));
+            }
             tsk = tsk->backtrack();
         }
     }
